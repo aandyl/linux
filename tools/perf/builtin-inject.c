@@ -35,6 +35,8 @@ struct perf_inject {
 	bool			have_auxtrace;
 	bool			strip;
 	bool			jit_mode;
+	const char		*mmaps;
+	bool			mmaps_injected;
 	const char		*input_name;
 	struct perf_data	output;
 	u64			bytes_written;
@@ -235,12 +237,103 @@ static int perf_event__repipe_sample(struct perf_tool *tool,
 	return perf_event__repipe_synth(tool, event);
 }
 
+static int perf_inject__mmaps(struct perf_tool *tool,
+			      struct perf_sample *sample,
+			      struct machine *machine)
+{
+	struct perf_inject *inject = container_of(tool, struct perf_inject, tool);
+	FILE *file = NULL;
+	char *line = NULL;
+	union perf_event *event = NULL;
+	size_t size;
+	int ret;
+
+	file = fopen(inject->mmaps, "r");
+	if (file == NULL)
+		goto out_failure;
+
+	event = malloc(sizeof(*event));
+	if (!event)
+		goto out_failure;
+
+	while (!feof(file)) {
+		u64 map_start, map_len;
+		size_t n = 0;
+		int line_len, len;
+
+		line_len = getline(&line, &n, file);
+		if (line_len < 0)
+			break;
+
+		if (!line)
+			goto out_failure;
+
+		line[--line_len] = '\0'; /* \n */
+
+		len = hex2u64(line, &map_start);
+
+		len++;
+		if (len + 2 >= line_len) /* why +2? */
+			continue;
+
+		len += hex2u64(line + len, &map_len);
+
+		len++;
+		if (len + 2 >= line_len) /* why +2? */
+			continue;
+
+		memset(event, 0, sizeof(*event));
+
+		strlcpy(event->mmap2.filename, line + len, sizeof(event->mmap2.filename));
+		size = strlen(event->mmap2.filename) + 1;
+		size = PERF_ALIGN(size, sizeof(u64));
+
+		event->mmap2.header.type = PERF_RECORD_MMAP2;
+		event->mmap2.header.misc = PERF_RECORD_MISC_USER;
+		event->mmap2.header.size = sizeof(event->mmap2) - (sizeof(event->mmap2.filename) - size);
+		event->mmap2.start = map_start;
+		event->mmap2.len = map_len;
+		event->mmap2.pid = sample->pid;
+		event->mmap2.tid = sample->tid;
+
+		ret = perf_event__process_mmap2(tool, event, sample, machine);
+		if (ret)
+			goto out_failure;
+		perf_event__repipe(tool, event, sample, machine);
+	}
+
+	if (file)
+		fclose(file);
+	free(line);
+	free(event);
+
+	return 0;
+
+out_failure:
+	if (file)
+		fclose(file);
+	free(line);
+	free(event);
+	pr_err("Problem injecting supplemental mmaps");
+	return -1;
+}
+
 static int perf_event__repipe_mmap(struct perf_tool *tool,
 				   union perf_event *event,
 				   struct perf_sample *sample,
 				   struct machine *machine)
 {
+	struct perf_inject *inject = container_of(tool, struct perf_inject, tool);
 	int err;
+
+	/* Inject supplemental mmaps the first time we see an mmap or mmap2 event */
+	if (inject->mmaps && !inject->mmaps_injected && sample->pid) {
+		perf_inject__mmaps(tool, sample, machine);
+		inject->mmaps_injected = true;
+	}
+
+	if (!strcmp(event->mmap2.filename, "/dev/isgx"))
+		return 0;
 
 	err = perf_event__process_mmap(tool, event, sample, machine);
 	perf_event__repipe(tool, event, sample, machine);
@@ -278,7 +371,17 @@ static int perf_event__repipe_mmap2(struct perf_tool *tool,
 				   struct perf_sample *sample,
 				   struct machine *machine)
 {
+	struct perf_inject *inject = container_of(tool, struct perf_inject, tool);
 	int err;
+
+	/* Inject supplemental mmaps the first time we see an mmap or mmap2 event */
+	if (inject->mmaps && !inject->mmaps_injected && sample->pid) {
+		perf_inject__mmaps(tool, sample, machine);
+		inject->mmaps_injected = true;
+	}
+
+	if (!strcmp(event->mmap2.filename, "/dev/isgx"))
+		return 0;
 
 	err = perf_event__process_mmap2(tool, event, sample, machine);
 	perf_event__repipe(tool, event, sample, machine);
@@ -644,6 +747,11 @@ static int __cmd_inject(struct perf_inject *inject)
 
 	signal(SIGINT, sig_handler);
 
+	if (inject->mmaps) {
+		inject->tool.mmap	  = perf_event__repipe_mmap;
+		inject->tool.mmap2	  = perf_event__repipe_mmap2;
+	}
+
 	if (inject->build_ids || inject->sched_stat ||
 	    inject->itrace_synth_opts.set) {
 		inject->tool.mmap	  = perf_event__repipe_mmap;
@@ -800,6 +908,8 @@ int cmd_inject(int argc, const char **argv)
 #ifdef HAVE_JITDUMP
 		OPT_BOOLEAN('j', "jit", &inject.jit_mode, "merge jitdump files into perf.data file"),
 #endif
+		OPT_STRING('m', "mmaps", &inject.mmaps, "file",
+			   "Merge supplemental mmap information into perf data"),
 		OPT_INCR('v', "verbose", &verbose,
 			 "be more verbose (show build ids, etc)"),
 		OPT_STRING(0, "kallsyms", &symbol_conf.kallsyms_name, "file",
@@ -854,6 +964,8 @@ int cmd_inject(int argc, const char **argv)
 		inject.tool.ordered_events = true;
 		inject.tool.ordering_requires_timestamps = true;
 	}
+
+
 #ifdef HAVE_JITDUMP
 	if (inject.jit_mode) {
 		inject.tool.mmap2	   = perf_event__jit_repipe_mmap2;
