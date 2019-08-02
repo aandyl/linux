@@ -257,7 +257,7 @@ static int perf_inject__mmaps(struct perf_tool *tool,
 		goto out_failure;
 
 	while (!feof(file)) {
-		u64 map_start, map_len;
+		u64 map_start, map_end, map_offset;
 		size_t n = 0;
 		int line_len, len;
 
@@ -276,7 +276,13 @@ static int perf_inject__mmaps(struct perf_tool *tool,
 		if (len + 2 >= line_len) /* why +2? */
 			continue;
 
-		len += hex2u64(line + len, &map_len);
+		len += hex2u64(line + len, &map_end);
+
+		len++;
+		if (len + 2 >= line_len) /* why +2? */
+			continue;
+
+		len += hex2u64(line + len, &map_offset);
 
 		len++;
 		if (len + 2 >= line_len) /* why +2? */
@@ -292,7 +298,8 @@ static int perf_inject__mmaps(struct perf_tool *tool,
 		event->mmap2.header.misc = PERF_RECORD_MISC_USER;
 		event->mmap2.header.size = sizeof(event->mmap2) - (sizeof(event->mmap2.filename) - size);
 		event->mmap2.start = map_start;
-		event->mmap2.len = map_len;
+		event->mmap2.len = map_end - map_start;
+		event->mmap2.pgoff = map_offset;
 		event->mmap2.pid = sample->pid;
 		event->mmap2.tid = sample->tid;
 
