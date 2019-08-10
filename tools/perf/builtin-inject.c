@@ -239,7 +239,7 @@ static int perf_event__repipe_sample(struct perf_tool *tool,
 
 static int perf_inject__mmaps(struct perf_tool *tool,
 			      struct perf_sample *sample,
-			      struct machine *machine)
+			      struct machine *machine, u32 pid, u32 tid)
 {
 	struct perf_inject *inject = container_of(tool, struct perf_inject, tool);
 	FILE *file = NULL;
@@ -300,8 +300,8 @@ static int perf_inject__mmaps(struct perf_tool *tool,
 		event->mmap2.start = map_start;
 		event->mmap2.len = map_end - map_start;
 		event->mmap2.pgoff = map_offset;
-		event->mmap2.pid = sample->pid;
-		event->mmap2.tid = sample->tid;
+		event->mmap2.pid = pid;
+		event->mmap2.tid = tid;
 
 		ret = perf_event__process_mmap2(tool, event, sample, machine);
 		if (ret)
@@ -334,8 +334,8 @@ static int perf_event__repipe_mmap(struct perf_tool *tool,
 	int err;
 
 	/* Inject supplemental mmaps the first time we see an mmap or mmap2 event */
-	if (inject->mmaps && !inject->mmaps_injected && sample->pid) {
-		perf_inject__mmaps(tool, sample, machine);
+	if (inject->mmaps && !inject->mmaps_injected && event->mmap2.tid) {
+		perf_inject__mmaps(tool, sample, machine, event->mmap2.pid, event->mmap2.tid);
 		inject->mmaps_injected = true;
 	}
 
@@ -382,8 +382,8 @@ static int perf_event__repipe_mmap2(struct perf_tool *tool,
 	int err;
 
 	/* Inject supplemental mmaps the first time we see an mmap or mmap2 event */
-	if (inject->mmaps && !inject->mmaps_injected && sample->pid) {
-		perf_inject__mmaps(tool, sample, machine);
+	if (inject->mmaps && !inject->mmaps_injected && event->mmap2.tid) {
+		perf_inject__mmaps(tool, sample, machine, event->mmap2.pid, event->mmap2.tid);
 		inject->mmaps_injected = true;
 	}
 
